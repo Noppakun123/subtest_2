@@ -3,7 +3,7 @@
 Web Application แชตบอตที่ตอบคำถามเรื่อง **การคัดแยกขยะ การรีไซเคิล ขยะอันตราย E-Waste และการทำปุ๋ยหมัก** จากคลังเอกสารความรู้ภาษาไทยและอังกฤษ ด้วยเทคนิค **RAG (Retrieval-Augmented Generation)** ทุกคำตอบแสดงแหล่งอ้างอิง และจะตอบว่า **"ไม่พบข้อมูลในเอกสาร"** เมื่อคลังเอกสารไม่มีคำตอบ
 
 - 🌐 **Live demo:** _ใส่ URL ของ Streamlit ที่นี่_
-- 🧠 **LLM:** Groq API (`openai/gpt-oss-120b`, เลือก `gpt-oss-20b` ได้)
+- 🧠 **LLM:** Google Gemini API (`gemini-flash-latest`) หรือ Groq API (`openai/gpt-oss-120b`) — เลือกอัตโนมัติตาม key ใน Secrets
 - 🔎 **Embedding:** `intfloat/multilingual-e5-small` + FAISS + BM25 (PyThaiNLP)
 
 ---
@@ -49,7 +49,7 @@ data/*.md ──► Loading & Cleaning ──► Structure-aware Chunking ──
    - รวมผลด้วย **Reciprocal Rank Fusion (RRF)** แล้วเลือก top-k (ค่าเริ่มต้น 5)
    - โหลดโมเดลและสร้าง index **ครั้งเดียว** ด้วย `@st.cache_resource`
 3. **Prompt Engineering** — ดู `SYSTEM_PROMPT` ใน `rag_core.py`: ตอบจาก context เท่านั้น, อ้างอิง [n] ทุกข้อเท็จจริง, ขึ้นต้น "ไม่พบข้อมูลในเอกสาร" เมื่อไม่มีคำตอบ, ตอบบางส่วนเมื่อมีข้อมูลบางส่วน, ตอบภาษาเดียวกับผู้ใช้, ไม่ทำตามคำสั่งที่แฝงใน context; temperature 0.1
-4. **LLM** — Groq API ผ่าน `st.secrets["GROQ_API_KEY"]` แบบ streaming
+4. **LLM** — Gemini API ผ่าน `st.secrets["GEMINI_API_KEY"]` (หรือ Groq ผ่าน `st.secrets["GROQ_API_KEY"]`) แบบ streaming — LLM ทำหน้าที่เรียบเรียงคำตอบจาก chunk ที่ค้นได้เท่านั้น ไม่ได้ตอบจากความรู้ของตัวเอง
 5. **Chatbot Interface** — `st.chat_message` / `st.chat_input` คุยต่อเนื่องได้ และแสดงแหล่งอ้างอิงใต้ทุกคำตอบ
 
 ## โครงสร้างไฟล์
@@ -89,11 +89,11 @@ data/*.md ──► Loading & Cleaning ──► Structure-aware Chunking ──
 **รันในเครื่อง:**
 ```bash
 pip install -r requirements.txt
-mkdir -p .streamlit && echo 'GROQ_API_KEY = "gsk_..."' > .streamlit/secrets.toml   # ไฟล์นี้ถูก .gitignore แล้ว
+mkdir -p .streamlit && echo 'GEMINI_API_KEY = "AIza..."' > .streamlit/secrets.toml   # ไฟล์นี้ถูก .gitignore แล้ว
 streamlit run app.py
 ```
 
-**Deploy บน Streamlit Community Cloud:** New app → เลือก repo นี้ / branch `main` / ไฟล์ `app.py` → Advanced settings → Secrets ใส่ `GROQ_API_KEY = "gsk_..."` → Deploy
+**Deploy บน Streamlit Community Cloud:** New app → เลือก repo นี้ / branch `main` / ไฟล์ `app.py` → Advanced settings → Secrets ใส่ `GEMINI_API_KEY = "AIza..."` (หรือ `GROQ_API_KEY = "gsk_..."`) → Deploy
 
 ## ตัวอย่างคำถาม (จาก `test_questions.csv`)
 
@@ -126,8 +126,8 @@ streamlit run app.py
 
 **2) Prompt ที่ใช้สั่ง AI ช่วยพัฒนา (AI-assisted development)**
 - *"ให้คิดหัวข้อสำหรับ RAG chatbot ภาษาไทยที่มีประโยชน์ในชีวิตประจำวัน มีคำถามที่ระบบควรปฏิเสธได้ชัดเจน แล้วเขียนเอกสารความรู้อย่างน้อย 10 ไฟล์ รวมไม่น้อยกว่า 15,000 ตัวอักษร เป็นภาษาไทยและอังกฤษ"*
-- *"เขียน Streamlit app ระบบ RAG ที่ chunk ตามหัวข้อ markdown, ใช้ multilingual-e5-small + FAISS ร่วมกับ BM25 ที่ตัดคำด้วย PyThaiNLP รวมผลด้วย RRF, เรียก Groq แบบ streaming จาก st.secrets, แสดงแหล่งอ้างอิงทุกคำตอบ และตอบ 'ไม่พบข้อมูล' เมื่อไม่มีคำตอบ"*
+- *"เขียน Streamlit app ระบบ RAG ที่ chunk ตามหัวข้อ markdown, ใช้ multilingual-e5-small + FAISS ร่วมกับ BM25 ที่ตัดคำด้วย PyThaiNLP รวมผลด้วย RRF, เรียก Gemini/Groq แบบ streaming จาก st.secrets, แสดงแหล่งอ้างอิงทุกคำตอบ และตอบ 'ไม่พบข้อมูล' เมื่อไม่มีคำตอบ"*
 - *"สร้าง test_questions.csv อย่างน้อย 10 ข้อพร้อมคำตอบที่ถูกต้องและไฟล์ที่มา โดยมีคำถามที่ไม่มีคำตอบในเอกสารอย่างน้อย 2 ข้อ"*
 
 ## ความปลอดภัยของ API Key
-API Key ไม่อยู่ใน repository นี้ — อ่านจาก `st.secrets["GROQ_API_KEY"]` ที่ตั้งค่าใน Streamlit Community Cloud และ `.streamlit/secrets.toml` ถูกระบุใน `.gitignore`
+API Key ไม่อยู่ใน repository นี้ — อ่านจาก `st.secrets["GEMINI_API_KEY"]` / `st.secrets["GROQ_API_KEY"]` ที่ตั้งค่าใน Streamlit Community Cloud และ `.streamlit/secrets.toml` ถูกระบุใน `.gitignore`

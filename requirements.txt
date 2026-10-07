@@ -4,6 +4,7 @@ streamlit>=1.40
 sentence-transformers>=3.0
 faiss-cpu
 groq>=0.30
+openai>=1.40
 pythainlp>=5.0
 rank-bm25
 numpy

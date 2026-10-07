@@ -16,8 +16,17 @@ from rag_core import (
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 EMBED_MODEL = "intfloat/multilingual-e5-small"  # ~470MB, รองรับไทย/อังกฤษ เหมาะกับหน่วยความจำจำกัด
-LLM_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
-REWRITE_MODEL = "openai/gpt-oss-20b"
+# รองรับ 2 ผู้ให้บริการ: เลือกอัตโนมัติตาม key ที่ใส่ใน Secrets (GEMINI_API_KEY มาก่อน)
+PROVIDERS = {
+    "gemini": {"secret": "GEMINI_API_KEY", "label": "Google Gemini",
+               "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+               "models": ["gemini-flash-latest", "gemini-flash-lite-latest"],
+               "rewrite": "gemini-flash-lite-latest"},
+    "groq": {"secret": "GROQ_API_KEY", "label": "Groq",
+             "base_url": None,
+             "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+             "rewrite": "openai/gpt-oss-20b"},
+}
 
 EXAMPLES = [
     "ขวดน้ำพลาสติกต้องทิ้งถังสีอะไร และต้องเตรียมอย่างไร",
@@ -63,25 +72,37 @@ def get_index():
     return HybridIndex(chunks, embed), docs
 
 
-def get_client():
+def _secret(name):
     try:
-        key = st.secrets["GROQ_API_KEY"]
+        return st.secrets[name]
     except Exception:
-        key = os.environ.get("GROQ_API_KEY")
-    if not key:
-        return None
-    from groq import Groq
-    return Groq(api_key=key)
+        return os.environ.get(name)
 
 
-def chat_kwargs(model):
+def get_client():
+    """คืน (client, provider) จาก API key ที่อยู่ใน st.secrets"""
+    for name, cfg in PROVIDERS.items():
+        key = _secret(cfg["secret"])
+        if not key:
+            continue
+        if name == "groq":
+            from groq import Groq
+            return Groq(api_key=key), name
+        from openai import OpenAI  # Gemini มี endpoint ที่เข้ากันได้กับ OpenAI SDK
+        return OpenAI(api_key=key, base_url=cfg["base_url"]), name
+    return None, None
+
+
+def chat_kwargs(model, max_tokens):
     kw = {"model": model, "temperature": 0.1}
-    if model.startswith("openai/gpt-oss"):
-        kw.update(reasoning_effort="low", include_reasoning=False)
+    if model.startswith("openai/gpt-oss"):  # Groq
+        kw.update(reasoning_effort="low", include_reasoning=False, max_completion_tokens=max_tokens)
+    else:  # Gemini
+        kw.update(reasoning_effort="low", max_tokens=max_tokens + 1500)  # เผื่อ token ของการคิด
     return kw
 
 
-def rewrite_query(client, history, question):
+def rewrite_query(client, rewrite_model, history, question):
     """ทำให้คำถามต่อเนื่อง (เช่น 'แล้วอันนั้นล่ะ') กลายเป็นคำถามสมบูรณ์ก่อนค้นหา"""
     turns = [m for m in history if m["role"] in ("user", "assistant")][-4:]
     if not turns:
@@ -91,7 +112,7 @@ def rewrite_query(client, history, question):
         r = client.chat.completions.create(
             messages=[{"role": "system", "content": REWRITE_PROMPT},
                       {"role": "user", "content": f"ประวัติ:\n{convo}\n\nคำถามล่าสุด: {question}"}],
-            max_completion_tokens=400, **chat_kwargs(REWRITE_MODEL))
+            **chat_kwargs(rewrite_model, 400))
         out = (r.choices[0].message.content or "").strip().split("\n")[0]
         return out or question
     except Exception:
@@ -104,8 +125,7 @@ def stream_answer(client, model, history, question, results):
     for m in history[-6:]:
         msgs.append({"role": m["role"], "content": m["content"]})
     msgs.append({"role": "user", "content": build_user_prompt(question, results)})
-    stream = client.chat.completions.create(messages=msgs, stream=True,
-                                            max_completion_tokens=1500, **chat_kwargs(model))
+    stream = client.chat.completions.create(messages=msgs, stream=True, **chat_kwargs(model, 1500))
     for part in stream:
         delta = part.choices[0].delta.content if part.choices else None
         if delta:
@@ -139,6 +159,8 @@ def render_sources(sources, answer, show_scores):
 # Sidebar
 # ---------------------------------------------------------------------------
 index, docs = get_index()
+client, provider = get_client()
+cfg = PROVIDERS.get(provider or "groq")
 
 with st.sidebar:
     st.header("♻️ แยกให้ถูก")
@@ -149,7 +171,7 @@ with st.sidebar:
             st.session_state.pending = q
     st.divider()
     with st.expander("⚙️ ตั้งค่า"):
-        model = st.selectbox("LLM (Groq)", LLM_MODELS, index=0)
+        model = st.selectbox(f"LLM ({cfg['label']})", cfg["models"], index=0)
         top_k = st.slider("จำนวน chunk ที่ค้นคืน (top-k)", 3, 8, 5)
         use_rewrite = st.toggle("เขียนคำถามต่อเนื่องใหม่ก่อนค้นหา", value=True)
         show_scores = st.toggle("แสดงคะแนนการค้นหา", value=False)
@@ -175,9 +197,8 @@ st.markdown(
     "<span class='bin' style='background:#c62828'>แดง · อันตราย</span></div>",
     unsafe_allow_html=True)
 
-client = get_client()
 if client is None:
-    st.error("ยังไม่ได้ตั้งค่า `GROQ_API_KEY` ใน Secrets ของ Streamlit "
+    st.error("ยังไม่ได้ตั้งค่า `GEMINI_API_KEY` หรือ `GROQ_API_KEY` ใน Secrets ของ Streamlit "
              "(Manage app → Settings → Secrets) จึงยังตอบคำถามไม่ได้")
 
 if "messages" not in st.session_state:
@@ -202,7 +223,7 @@ if question and client is not None:
 
     with st.chat_message("assistant", avatar="♻️"):
         with st.spinner("กำลังค้นหาเอกสาร…"):
-            search_q = rewrite_query(client, history, question) if (use_rewrite and history) else question
+            search_q = rewrite_query(client, cfg["rewrite"], history, question) if (use_rewrite and history) else question
             results = index.search(search_q, k=top_k)
         if search_q != question:
             st.caption(f"🔁 ค้นหาด้วย: {search_q}")
