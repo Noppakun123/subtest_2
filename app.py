@@ -98,7 +98,7 @@ def chat_kwargs(model, max_tokens):
     if model.startswith("openai/gpt-oss"):  # Groq
         kw.update(reasoning_effort="low", include_reasoning=False, max_completion_tokens=max_tokens)
     else:  # Gemini
-        kw.update(reasoning_effort="low", max_tokens=max_tokens + 1500)  # เผื่อ token ของการคิด
+        kw.update(reasoning_effort="low", max_tokens=max_tokens + 6000)  # Gemini นับ token ที่ใช้ "คิด" รวมด้วย ต้องเผื่อไว้ไม่ให้คำตอบถูกตัด
     return kw
 
 
@@ -172,7 +172,7 @@ with st.sidebar:
     st.divider()
     with st.expander("⚙️ ตั้งค่า"):
         model = st.selectbox(f"LLM ({cfg['label']})", cfg["models"], index=0)
-        top_k = st.slider("จำนวน chunk ที่ค้นคืน (top-k)", 3, 8, 5)
+        top_k = st.slider("จำนวน chunk ที่ค้นคืน (top-k)", 3, 10, 7)
         use_rewrite = st.toggle("เขียนคำถามต่อเนื่องใหม่ก่อนค้นหา", value=True)
         show_scores = st.toggle("แสดงคะแนนการค้นหา", value=False)
     with st.expander(f"📂 เอกสารความรู้ ({len(docs)} ไฟล์ · {len(index.chunks)} chunks)"):
