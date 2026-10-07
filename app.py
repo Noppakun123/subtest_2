@@ -119,17 +119,49 @@ def rewrite_query(client, rewrite_model, history, question):
         return question
 
 
-def stream_answer(client, model, history, question, results):
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+RETRY_NOTE = ("คำตอบก่อนหน้าถูกตัดกลางคัน ให้ตอบใหม่ให้จบครบถ้วน กระชับขึ้น "
+              "และเรียบเรียงด้วยคำของตัวเอง ห้ามคัดลอกข้อความจาก context ยาว ๆ แบบคำต่อคำ")
+
+
+def stream_answer(client, model, history, question, results, status, retry=False):
+    """stream คำตอบ และเก็บ finish_reason ไว้ใน status เพื่อตรวจว่าคำตอบถูกตัดหรือไม่"""
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT + (f"\n\n{RETRY_NOTE}" if retry else "")}]
     # ส่งบทสนทนาก่อนหน้า (ข้อความเท่านั้น) เพื่อให้คุยต่อเนื่องได้
     for m in history[-6:]:
         msgs.append({"role": m["role"], "content": m["content"]})
     msgs.append({"role": "user", "content": build_user_prompt(question, results)})
-    stream = client.chat.completions.create(messages=msgs, stream=True, **chat_kwargs(model, 1500))
+    kw = chat_kwargs(model, 1500)
+    if retry:
+        kw["temperature"] = 0.5
+    stream = client.chat.completions.create(messages=msgs, stream=True, **kw)
     for part in stream:
-        delta = part.choices[0].delta.content if part.choices else None
+        if not part.choices:
+            continue
+        choice = part.choices[0]
+        fr = getattr(choice, "finish_reason", None)
+        if fr:
+            status["finish"] = fr
+        delta = choice.delta.content if choice.delta else None
         if delta:
             yield delta
+
+
+def generate(client, model, history, question, results):
+    """ตอบแบบ streaming; ถ้าถูกตัด (finish_reason ไม่ใช่ stop เช่น length / content_filter) ให้ลองใหม่ 1 ครั้ง"""
+    box = st.empty()
+    for attempt in range(2):
+        status = {}
+        with box.container():
+            answer = st.write_stream(stream_answer(client, model, history, question, results,
+                                                   status, retry=attempt > 0))
+        finish = status.get("finish")
+        if finish in (None, "stop") and answer:
+            return answer, finish
+        box.empty()
+    with box.container():
+        answer = (answer or "") + "\n\n⚠️ _คำตอบอาจไม่ครบถ้วน ลองถามใหม่อีกครั้งหรือถามให้เฉพาะเจาะจงขึ้น_"
+        st.markdown(answer)
+    return answer, finish
 
 
 def render_sources(sources, answer, show_scores):
@@ -228,7 +260,9 @@ if question and client is not None:
         if search_q != question:
             st.caption(f"🔁 ค้นหาด้วย: {search_q}")
         try:
-            answer = st.write_stream(stream_answer(client, model, history, question, results))
+            answer, finish = generate(client, model, history, question, results)
+            if show_scores:
+                st.caption(f"finish_reason: {finish}")
         except Exception as e:  # noqa: BLE001
             answer = f"เกิดข้อผิดพลาดในการเรียก LLM: `{e}`"
             st.error(answer)
