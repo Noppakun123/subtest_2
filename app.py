@@ -1,5 +1,6 @@
 """แยกให้ถูก (Sort It Right) — RAG chatbot ตอบคำถามการคัดแยกขยะและรีไซเคิล"""
 import os
+import re
 
 import streamlit as st
 
@@ -93,13 +94,48 @@ def get_client():
     return None, None
 
 
-def chat_kwargs(model, max_tokens):
-    kw = {"model": model, "temperature": 0.1}
+# ระดับการ "คิด" ของโมเดล: ยิ่งน้อยยิ่งตอบเร็ว งาน RAG แค่เรียบเรียงจาก context จึงไม่ต้องคิดมาก
+_EFFORT = {"gemini": ["minimal", "low"], "groq": ["low"]}
+
+
+@st.cache_resource
+def _effort_state():
+    return {}  # จำว่าโมเดลไหนรองรับ effort ระดับไหน จะได้ไม่ลองซ้ำทุกครั้ง
+
+
+def chat_kwargs(model, max_tokens, effort):
+    kw = {"model": model, "temperature": 0.1, "reasoning_effort": effort}
     if model.startswith("openai/gpt-oss"):  # Groq
-        kw.update(reasoning_effort="low", include_reasoning=False, max_completion_tokens=max_tokens)
-    else:  # Gemini
-        kw.update(reasoning_effort="low", max_tokens=max_tokens + 6000)  # Gemini นับ token ที่ใช้ "คิด" รวมด้วย ต้องเผื่อไว้ไม่ให้คำตอบถูกตัด
+        kw.update(include_reasoning=False, max_completion_tokens=max_tokens)
+    else:  # Gemini นับ token ที่ใช้ "คิด" รวมด้วย ต้องเผื่อไว้ไม่ให้คำตอบถูกตัด
+        kw.update(max_tokens=max_tokens + 6000)
     return kw
+
+
+def llm_create(client, model, max_tokens, **extra):
+    """เรียก LLM ด้วยระดับการคิดต่ำสุดที่โมเดลรองรับ ถ้าไม่รองรับจะถอยไประดับถัดไปอัตโนมัติ"""
+    state = _effort_state()
+    levels = _EFFORT["groq" if model.startswith("openai/gpt-oss") else "gemini"]
+    start = state.get(model, 0)
+    for i in range(start, len(levels)):
+        kw = chat_kwargs(model, max_tokens, levels[i])
+        kw.update(extra)
+        try:
+            out = client.chat.completions.create(**kw)
+            state[model] = i
+            return out
+        except Exception:
+            if i == len(levels) - 1:
+                raise
+
+
+FOLLOW_UP = re.compile(r"(นั้น|นี้|นี่|มัน|อันไหน|อันนี้|แล้ว|ล่ะ|ด้วยไหม|อีก|ต่อ|ข้อ\s*\d|"
+                       r"\b(it|its|that|this|they|them|those|these|what about|and)\b)", re.I)
+
+
+def needs_rewrite(question):
+    """เขียนคำถามใหม่เฉพาะเมื่อเป็นคำถามต่อเนื่อง (มีคำอ้างถึง หรือสั้นมาก) ประหยัดการเรียก LLM 1 รอบ"""
+    return len(question.strip()) < 15 or bool(FOLLOW_UP.search(question))
 
 
 def rewrite_query(client, rewrite_model, history, question):
@@ -109,10 +145,9 @@ def rewrite_query(client, rewrite_model, history, question):
         return question
     convo = "\n".join(f"{'ผู้ใช้' if m['role'] == 'user' else 'ผู้ช่วย'}: {m['content'][:400]}" for m in turns)
     try:
-        r = client.chat.completions.create(
-            messages=[{"role": "system", "content": REWRITE_PROMPT},
-                      {"role": "user", "content": f"ประวัติ:\n{convo}\n\nคำถามล่าสุด: {question}"}],
-            **chat_kwargs(rewrite_model, 400))
+        r = llm_create(client, rewrite_model, 400,
+                       messages=[{"role": "system", "content": REWRITE_PROMPT},
+                                 {"role": "user", "content": f"ประวัติ:\n{convo}\n\nคำถามล่าสุด: {question}"}])
         out = (r.choices[0].message.content or "").strip().split("\n")[0]
         return out or question
     except Exception:
@@ -130,10 +165,8 @@ def stream_answer(client, model, history, question, results, status, retry=False
     for m in history[-6:]:
         msgs.append({"role": m["role"], "content": m["content"]})
     msgs.append({"role": "user", "content": build_user_prompt(question, results)})
-    kw = chat_kwargs(model, 1500)
-    if retry:
-        kw["temperature"] = 0.5
-    stream = client.chat.completions.create(messages=msgs, stream=True, **kw)
+    extra = {"temperature": 0.5} if retry else {}
+    stream = llm_create(client, model, 1500, messages=msgs, stream=True, **extra)
     for part in stream:
         if not part.choices:
             continue
@@ -255,7 +288,7 @@ if question and client is not None:
 
     with st.chat_message("assistant", avatar="♻️"):
         with st.spinner("กำลังค้นหาเอกสาร…"):
-            search_q = rewrite_query(client, cfg["rewrite"], history, question) if (use_rewrite and history) else question
+            search_q = rewrite_query(client, cfg["rewrite"], history, question) if (use_rewrite and history and needs_rewrite(question)) else question
             results = index.search(search_q, k=top_k)
         if search_q != question:
             st.caption(f"🔁 ค้นหาด้วย: {search_q}")
